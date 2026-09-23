@@ -7,7 +7,10 @@ from syrupy.assertion import SnapshotAssertion
 from homeassistant.components import llm as llm_component
 from homeassistant.components.homeassistant import llm as ha_llm
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
-from homeassistant.components.homeassistant.llm import async_get_exposed_entities
+from homeassistant.components.homeassistant.llm import (
+    MAX_EXPOSED_OPTIONS,
+    async_get_exposed_entities,
+)
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import (
     area_registry as ar,
@@ -454,3 +457,85 @@ async def test_get_exposed_entities_brightness_percentage(hass: HomeAssistant) -
     exposed = async_get_exposed_entities(hass, "conversation", include_state=True)
     assert exposed["fan.kitchen"]["attributes"]["brightness"] == "128"
     assert "brightness_pct" not in exposed["fan.kitchen"]["attributes"]
+
+
+async def test_get_exposed_entities_options(hass: HomeAssistant) -> None:
+    """Test that an entity's declared options are exposed to the model."""
+    hass.states.async_set(
+        "select.washer_program",
+        "eco",
+        {"friendly_name": "Washer program", "options": ["eco", "cotton", "wool"]},
+    )
+    async_expose_entity(hass, "conversation", "select.washer_program", True)
+    hass.states.async_set(
+        "sensor.lock_operator",
+        "cleaning_company",
+        {
+            "friendly_name": "Lock operator",
+            "device_class": "enum",
+            "options": ["cleaning_company", "owner"],
+        },
+    )
+    async_expose_entity(hass, "conversation", "sensor.lock_operator", True)
+
+    exposed = async_get_exposed_entities(hass, "conversation", include_state=True)
+
+    # The list is passed through as a list, not flattened to a string.
+    assert exposed["select.washer_program"]["attributes"]["options"] == [
+        "eco",
+        "cotton",
+        "wool",
+    ]
+    assert exposed["sensor.lock_operator"]["attributes"]["options"] == [
+        "cleaning_company",
+        "owner",
+    ]
+
+    # Options are part of the live context, not the static prompt, so they stay
+    # out of the cached prompt prefix.
+    static = async_get_exposed_entities(hass, "conversation", include_state=False)
+    assert "attributes" not in static["select.washer_program"]
+
+    # An entity that declares no options gains none.
+    assert "options" not in exposed[ENTITY_ID].get("attributes", {})
+
+
+async def test_get_exposed_entities_options_length_cap(hass: HomeAssistant) -> None:
+    """Test that an over-long option list is dropped rather than truncated."""
+    at_cap = [f"program_{i}" for i in range(MAX_EXPOSED_OPTIONS)]
+    hass.states.async_set(
+        "select.dishwasher",
+        at_cap[0],
+        {"friendly_name": "Dishwasher", "options": at_cap},
+    )
+    async_expose_entity(hass, "conversation", "select.dishwasher", True)
+
+    exposed = async_get_exposed_entities(hass, "conversation", include_state=True)
+    assert exposed["select.dishwasher"]["attributes"]["options"] == at_cap
+
+    # One past the cap, and the whole list goes — a partial list would read as
+    # complete. `options` was the only attribute, so the key goes with it.
+    over_cap = [*at_cap, "program_extra"]
+    hass.states.async_set(
+        "select.dishwasher",
+        over_cap[0],
+        {"friendly_name": "Dishwasher", "options": over_cap},
+    )
+    exposed = async_get_exposed_entities(hass, "conversation", include_state=True)
+    assert "attributes" not in exposed["select.dishwasher"]
+
+    # Other interesting attributes survive the drop.
+    hass.states.async_set(
+        "sensor.washer_program",
+        over_cap[0],
+        {
+            "friendly_name": "Washer program",
+            "device_class": "enum",
+            "options": over_cap,
+        },
+    )
+    async_expose_entity(hass, "conversation", "sensor.washer_program", True)
+    exposed = async_get_exposed_entities(hass, "conversation", include_state=True)
+    attributes = exposed["sensor.washer_program"]["attributes"]
+    assert "options" not in attributes
+    assert attributes["device_class"] == "enum"

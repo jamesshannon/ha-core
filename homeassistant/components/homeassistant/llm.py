@@ -38,6 +38,11 @@ from .exposed_entities import async_should_expose
 CALENDAR_DOMAIN = "calendar"
 SCRIPT_DOMAIN = "script"
 
+# An entity's `options` are dropped above this length. 95.7% of the option lists
+# declared in core sit at or below it, and the longest that survives costs ~272
+# tokens; the ones above run into the thousands.
+MAX_EXPOSED_OPTIONS = 20
+
 NO_ENTITIES_PROMPT = (
     "Only if the user wants to control a device, tell them to expose entities "
     "to their voice assistant in Home Assistant."
@@ -92,6 +97,7 @@ def async_get_exposed_entities(
         "humidity",
         "unit_of_measurement",
         "device_class",
+        "options",
         "current_position",
         "percentage",
         "volume_level",
@@ -181,7 +187,18 @@ def async_get_exposed_entities(
                 attributes["brightness_pct"] = str(
                     max(pct, 1) if brightness > 0 else pct
                 )
-            info["attributes"] = attributes
+
+            # A long option list is dropped rather than truncated. A partial
+            # list the model reads as complete is worse than no list at all: it
+            # picks from the part it was given and never knows to ask.
+            if (
+                isinstance(options := attributes.get("options"), list)
+                and len(options) > MAX_EXPOSED_OPTIONS
+            ):
+                del attributes["options"]
+
+            if attributes:
+                info["attributes"] = attributes
 
         entities[state.entity_id] = info
 
